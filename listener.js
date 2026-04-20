@@ -15,7 +15,7 @@ const RPC_URLS = [
 
 const POLLING_INTERVAL = 15000; // 15 секунд
 const USDC_DECIMALS = 6;
-const START_BLOCKS_BACK = 100; // 🎯 ВСЕГО 100 блоков назад (вместо 10000)
+const START_BLOCKS_BACK = 100;
 
 const DISTRIBUTOR_ABI = [
     "event Withdrawal(address indexed shelter, uint256 amount)"
@@ -26,16 +26,16 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 let provider = null;
 let lastCheckedBlock = null;
 
+// ========== ФУНКЦИИ ==========
 async function findWorkingRpc() {
     for (const rpcUrl of RPC_URLS) {
         try {
-            console.log(`Пробуем RPC: ${rpcUrl}`);
             const testProvider = new ethers.JsonRpcProvider(rpcUrl);
             await testProvider.getBlockNumber();
-            console.log(`✅ RPC работает: ${rpcUrl}`);
+            console.log(`✅ RPC: ${rpcUrl.split('/')[2]}`);
             return testProvider;
         } catch (error) {
-            console.log(`❌ RPC не работает: ${rpcUrl}`);
+            console.log(`❌ RPC не работает: ${rpcUrl.split('/')[2]}`);
         }
     }
     throw new Error('Нет рабочих RPC');
@@ -43,48 +43,37 @@ async function findWorkingRpc() {
 
 async function fetchWithdrawalEvents(fromBlock, toBlock) {
     if (!provider) return [];
-    
     try {
         const contract = new ethers.Contract(DISTRIBUTOR_ADDRESS, DISTRIBUTOR_ABI, provider);
-        
-        if (fromBlock > toBlock) return [];
-        
-        console.log(`   Поиск событий: блоки ${fromBlock} → ${toBlock} (${toBlock - fromBlock + 1} блоков)`);
-        
         const events = await contract.queryFilter('Withdrawal', fromBlock, toBlock);
-        
-        if (events.length > 0) {
-            console.log(`   🎯 Найдено ${events.length} событий!`);
-        }
-        
         return events;
     } catch (error) {
-        console.error(`   Ошибка поиска: ${error.message}`);
+        console.error(`Ошибка поиска: ${error.message}`);
         return [];
     }
 }
 
 async function processWithdrawalEvent(event) {
-    const shelterAddress = event.args.shelter.toLowerCase(); 
+    const shelterAddress = event.args.shelter.toLowerCase();
     const amountRaw = event.args.amount;
     const amount = parseFloat(ethers.formatUnits(amountRaw, USDC_DECIMALS));
     const transactionHash = event.transactionHash;
+    const blockNumber = event.blockNumber;
     
     console.log(`\n🔔 НОВОЕ РАСПРЕДЕЛЕНИЕ:`);
     console.log(`   Приют: ${shelterAddress}`);
     console.log(`   Сумма: ${amount} USDT`);
+    console.log(`   Транзакция: ${transactionHash.slice(0, 20)}...`);
     
-    // Ищем по нижнему регистру
-    const { data: shelter, error } = await supabase
-        .from('shelters')
-        .select('id, name')
-        .eq('wallet_address', shelterAddress) 
-        .single();
-    
-}
+    try {
+        const { data: shelter, error: shelterError } = await supabase
+            .from('shelters')
+            .select('id, name')
+            .eq('wallet_address', shelterAddress)
+            .single();
         
         if (shelterError || !shelter) {
-            console.error(`   ❌ Приют не найден в БД`);
+            console.error(`   ❌ Приют не найден: ${shelterAddress}`);
             return;
         }
         
@@ -116,7 +105,7 @@ async function processWithdrawalEvent(event) {
         if (insertError) {
             console.error(`   ❌ Ошибка вставки: ${insertError.message}`);
         } else {
-            console.log(`   ✅ ЗАПИСАНО В SUPABASE!`);
+            console.log(`   ✅ ЗАПИСАНО! Сумма: ${amount} USDT`);
         }
         
     } catch (error) {
@@ -129,30 +118,23 @@ async function mainLoop() {
         if (!provider) {
             provider = await findWorkingRpc();
             const currentBlock = await provider.getBlockNumber();
-            // Начинаем только со 100 блоков назад (не 10000!)
             lastCheckedBlock = currentBlock - START_BLOCKS_BACK;
-            console.log(`\n🚀 Старт с блока ${lastCheckedBlock} (текущий: ${currentBlock})`);
-            console.log(`   (проверяем последние ${START_BLOCKS_BACK} блоков на пропущенные события)\n`);
+            console.log(`\n🚀 Старт с блока ${lastCheckedBlock}`);
         }
         
         const currentBlock = await provider.getBlockNumber();
         
         if (currentBlock > lastCheckedBlock) {
-            const fromBlock = lastCheckedBlock + 1;
-            const toBlock = currentBlock;
-            
-            console.log(`\n📡 Проверка новых блоков: ${fromBlock} → ${toBlock} (${toBlock - fromBlock + 1} блоков)`);
-            
-            const events = await fetchWithdrawalEvents(fromBlock, toBlock);
+            const events = await fetchWithdrawalEvents(lastCheckedBlock + 1, currentBlock);
             
             for (const event of events) {
                 await processWithdrawalEvent(event);
             }
             
             lastCheckedBlock = currentBlock;
-            console.log(`   ✅ Готово, следующий блок: ${currentBlock + 1}`);
-        } else {
-            console.log(`⏳ Новых блоков нет (блок ${currentBlock})`);
+            if (events.length > 0) {
+                console.log(`✅ Обработано ${events.length} событий, следующий блок: ${currentBlock + 1}`);
+            }
         }
         
     } catch (error) {
@@ -162,10 +144,9 @@ async function mainLoop() {
 }
 
 // ========== ЗАПУСК ==========
-console.log('🚀 Запуск polling слушателя...');
+console.log('🚀 Запуск слушателя...');
 console.log(`   Контракт: ${DISTRIBUTOR_ADDRESS}`);
-console.log(`   Интервал: ${POLLING_INTERVAL / 1000} сек`);
-console.log(`   Глубина при старте: ${START_BLOCKS_BACK} блоков\n`);
+console.log(`   Интервал: ${POLLING_INTERVAL / 1000} сек\n`);
 
 mainLoop();
 setInterval(mainLoop, POLLING_INTERVAL);
