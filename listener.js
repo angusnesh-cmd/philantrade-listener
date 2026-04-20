@@ -1,7 +1,6 @@
 import { ethers } from 'ethers';
 import { createClient } from '@supabase/supabase-js';
 
-// ========== КОНФИГУРАЦИЯ ==========
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const DISTRIBUTOR_ADDRESS = '0x108448D4cbAAAB82778775E77337D90eC6671D7f';
@@ -13,7 +12,7 @@ const RPC_URLS = [
     "https://polygon-amoy-bor-rpc.publicnode.com"
 ];
 
-const POLLING_INTERVAL = 15000; // 15 секунд
+const POLLING_INTERVAL = 15000;
 const USDC_DECIMALS = 6;
 const START_BLOCKS_BACK = 100;
 
@@ -26,7 +25,6 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 let provider = null;
 let lastCheckedBlock = null;
 
-// ========== ФУНКЦИИ ==========
 async function findWorkingRpc() {
     for (const rpcUrl of RPC_URLS) {
         try {
@@ -54,7 +52,8 @@ async function fetchWithdrawalEvents(fromBlock, toBlock) {
 }
 
 async function processWithdrawalEvent(event) {
-    const shelterAddress = event.args.shelter.toLowerCase();
+    const shelterAddress = event.args.shelter;
+    const shelterAddressLower = shelterAddress.toLowerCase();
     const amountRaw = event.args.amount;
     const amount = parseFloat(ethers.formatUnits(amountRaw, USDC_DECIMALS));
     const transactionHash = event.transactionHash;
@@ -69,11 +68,11 @@ async function processWithdrawalEvent(event) {
         const { data: shelter, error: shelterError } = await supabase
             .from('shelters')
             .select('id, name')
-            .eq('wallet_address', shelterAddress)
+            .eq('wallet_address', shelterAddressLower)
             .single();
         
         if (shelterError || !shelter) {
-            console.error(`   ❌ Приют не найден: ${shelterAddress}`);
+            console.error(`   ❌ Приют не найден: ${shelterAddressLower}`);
             return;
         }
         
@@ -103,9 +102,9 @@ async function processWithdrawalEvent(event) {
             });
         
         if (insertError) {
-            console.error(`   ❌ Ошибка вставки: ${insertError.message}`);
+            console.error(`   ❌ Ошибка: ${insertError.message}`);
         } else {
-            console.log(`   ✅ ЗАПИСАНО! Сумма: ${amount} USDT`);
+            console.log(`   ✅ ЗАПИСАНО! Приют ${shelter.name} должен отчитаться на ${amount} USDT`);
         }
         
     } catch (error) {
@@ -132,9 +131,7 @@ async function mainLoop() {
             }
             
             lastCheckedBlock = currentBlock;
-            if (events.length > 0) {
-                console.log(`✅ Обработано ${events.length} событий, следующий блок: ${currentBlock + 1}`);
-            }
+            console.log(`✅ Проверено до блока ${currentBlock}, найдено ${events.length} событий`);
         }
         
     } catch (error) {
@@ -143,10 +140,8 @@ async function mainLoop() {
     }
 }
 
-// ========== ЗАПУСК ==========
 console.log('🚀 Запуск слушателя...');
-console.log(`   Контракт: ${DISTRIBUTOR_ADDRESS}`);
-console.log(`   Интервал: ${POLLING_INTERVAL / 1000} сек\n`);
+console.log(`   Контракт: ${DISTRIBUTOR_ADDRESS}\n`);
 
 mainLoop();
 setInterval(mainLoop, POLLING_INTERVAL);
