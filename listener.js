@@ -65,23 +65,23 @@ async function fetchWithdrawalEvents(fromBlock, toBlock) {
 }
 
 async function processWithdrawalEvent(event) {
-    const shelterAddress = event.args.shelter;
+    const shelterAddress = event.args.shelter.toLowerCase(); 
     const amountRaw = event.args.amount;
     const amount = parseFloat(ethers.formatUnits(amountRaw, USDC_DECIMALS));
     const transactionHash = event.transactionHash;
-    const blockNumber = event.blockNumber;
     
     console.log(`\n🔔 НОВОЕ РАСПРЕДЕЛЕНИЕ:`);
     console.log(`   Приют: ${shelterAddress}`);
     console.log(`   Сумма: ${amount} USDT`);
-    console.log(`   Транзакция: ${transactionHash.slice(0, 20)}...`);
     
-    try {
-        const { data: shelter, error: shelterError } = await supabase
-            .from('shelters')
-            .select('id, name')
-            .eq('wallet_address', shelterAddress.toLowerCase())
-            .single();
+    // Ищем по нижнему регистру
+    const { data: shelter, error } = await supabase
+        .from('shelters')
+        .select('id, name')
+        .eq('wallet_address', shelterAddress) 
+        .single();
+    
+}
         
         if (shelterError || !shelter) {
             console.error(`   ❌ Приют не найден в БД`);
