@@ -1,9 +1,15 @@
 import { ethers } from 'ethers';
 import { createClient } from '@supabase/supabase-js';
 
+// ========== КОНФИГУРАЦИЯ ==========
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const DISTRIBUTOR_ADDRESS = '0x108448D4cbAAAB82778775E77337D90eC6671D7f';
+
+// МАССИВ ДИСТРИБЬЮТОРОВ (добавляй новых сюда)
+const DISTRIBUTORS = [
+    { address: "0x108448D4cbAAAB82778775E77337D90eC6671D7f", name: "Bitcoinholdrcompany" },
+    // { address: "0x7062bB18B77f798ACb202c4f07A7E23Ddb702107", name: "Кошачье счастье" },
+];
 
 const RPC_URLS = [
     "https://rpc-amoy.polygon.technology/",
@@ -23,8 +29,9 @@ const DISTRIBUTOR_ABI = [
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 let provider = null;
-let lastCheckedBlock = null;
+let lastCheckedBlock = {};
 
+// ========== ПОДКЛЮЧЕНИЕ К RPC ==========
 async function findWorkingRpc() {
     for (const rpcUrl of RPC_URLS) {
         try {
@@ -39,114 +46,105 @@ async function findWorkingRpc() {
     throw new Error('Нет рабочих RPC');
 }
 
-async function fetchWithdrawalEvents(fromBlock, toBlock) {
-    if (!provider) return [];
-    try {
-        const contract = new ethers.Contract(DISTRIBUTOR_ADDRESS, DISTRIBUTOR_ABI, provider);
-        const events = await contract.queryFilter('Withdrawal', fromBlock, toBlock);
-        return events;
-    } catch (error) {
-        console.error(`Ошибка поиска: ${error.message}`);
-        return [];
-    }
-}
-
-async function processWithdrawalEvent(event) {
-    const shelterAddress = event.args.shelter;
-    const shelterAddressLower = shelterAddress.toLowerCase();
-    const amountRaw = event.args.amount;
+// ========== ОБРАБОТКА СОБЫТИЯ ==========
+async function processWithdrawalEvent(distributorAddress, shelterAddress, amountRaw, transactionHash, blockNumber) {
     const amount = parseFloat(ethers.formatUnits(amountRaw, USDC_DECIMALS));
-    const transactionHash = event.transactionHash;
-    const blockNumber = event.blockNumber;
+    const shelterAddressLower = shelterAddress.toLowerCase();
     
-    console.log(`\n🔔 НОВОЕ РАСПРЕДЕЛЕНИЕ:`);
-    console.log(`   Приют: ${shelterAddress}`);
+    console.log(`\n🔔 РАСПРЕДЕЛЕНИЕ ОТ ${distributorAddress.slice(0, 10)}...`);
+    console.log(`   Приют: ${shelterAddressLower}`);
     console.log(`   Сумма: ${amount} USDT`);
     console.log(`   Транзакция: ${transactionHash.slice(0, 20)}...`);
     
-    try {
-        const { data: shelter, error: shelterError } = await supabase
-            .from('shelters')
-            .select('id, name')
-            .eq('wallet_address', shelterAddressLower)
-            .single();
-        
-        if (shelterError || !shelter) {
-            console.error(`   ❌ Приют не найден: ${shelterAddressLower}`);
-            return;
-        }
-        
-        console.log(`   ✅ Приют: ${shelter.name}`);
-        
-        const { data: existing } = await supabase
-            .from('distributions')
-            .select('id')
-            .eq('transaction_hash', transactionHash)
-            .maybeSingle();
-        
-        if (existing) {
-            console.log(`   ⏭️ Уже обработано`);
-            return;
-        }
-        
-        const { error: insertError } = await supabase
-            .from('distributions')
-            .insert({
-                distributor_address: DISTRIBUTOR_ADDRESS,
-                shelter_id: shelter.id,
-                amount: amount,
-                transaction_hash: transactionHash,
-                block_number: blockNumber,
-                block_timestamp: new Date(),
-                is_processed: false
-            });
-        
-        if (insertError) {
-            console.error(`   ❌ Ошибка: ${insertError.message}`);
-        } else {
-            console.log(`   ✅ ЗАПИСАНО! Приют ${shelter.name} должен отчитаться на ${amount} USDT`);
-        }
-        
-    } catch (error) {
-        console.error(`   ❌ Ошибка: ${error.message}`);
+    // Вызываем SQL функцию add_distribution
+    const { data, error } = await supabase.rpc('add_distribution', {
+        p_distributor_address: distributorAddress,
+        p_shelter_wallet: shelterAddressLower,
+        p_amount: amount,
+        p_transaction_hash: transactionHash,
+        p_block_number: blockNumber
+    });
+    
+    if (error) {
+        console.error(`   ❌ Ошибка RPC: ${error.message}`);
+    } else if (data?.success === false) {
+        console.error(`   ❌ ${data.error}`);
+    } else if (data?.success) {
+        console.log(`   ✅ Успешно! Баланс: ${data.old_amount_due} → ${data.new_amount_due} USDT`);
+    } else {
+        console.log(`   📦 Ответ:`, data);
     }
 }
 
-async function mainLoop() {
+// ========== ПОИСК СОБЫТИЙ ДЛЯ ВСЕХ ДИСТРИБЬЮТОРОВ ==========
+async function checkAllDistributors() {
+    if (!provider) return;
+    
     try {
-        if (!provider) {
-            provider = await findWorkingRpc();
-            const currentBlock = await provider.getBlockNumber();
-            lastCheckedBlock = currentBlock - START_BLOCKS_BACK;
-            console.log(`\n🚀 Старт с блока ${lastCheckedBlock}`);
-        }
-        
         const currentBlock = await provider.getBlockNumber();
         
-        if (currentBlock > lastCheckedBlock) {
-            const events = await fetchWithdrawalEvents(lastCheckedBlock + 1, currentBlock);
+        for (const distributor of DISTRIBUTORS) {
+            const address = distributor.address;
             
-            for (const event of events) {
-                await processWithdrawalEvent(event);
+            // Инициализируем lastCheckedBlock для этого дистрибьютора
+            if (!lastCheckedBlock[address]) {
+                lastCheckedBlock[address] = currentBlock - START_BLOCKS_BACK;
+                console.log(`📡 ${distributor.name}: старт с блока ${lastCheckedBlock[address]}`);
             }
             
-            lastCheckedBlock = currentBlock;
-            console.log(`✅ Проверено до блока ${currentBlock}, найдено ${events.length} событий`);
+            if (currentBlock > lastCheckedBlock[address]) {
+                try {
+                    const contract = new ethers.Contract(address, DISTRIBUTOR_ABI, provider);
+                    const events = await contract.queryFilter('Withdrawal', lastCheckedBlock[address] + 1, currentBlock);
+                    
+                    for (const event of events) {
+                        await processWithdrawalEvent(
+                            address,
+                            event.args.shelter,
+                            event.args.amount,
+                            event.transactionHash,
+                            event.blockNumber
+                        );
+                    }
+                    
+                    lastCheckedBlock[address] = currentBlock;
+                    
+                    if (events.length > 0) {
+                        console.log(`   ✅ ${distributor.name}: обработано ${events.length} событий`);
+                    }
+                } catch (error) {
+                    console.error(`❌ Ошибка для ${distributor.name}: ${error.message}`);
+                }
+            }
         }
-        
     } catch (error) {
-        console.error('❌ Ошибка:', error.message);
-        provider = null;
+        console.error('❌ Ошибка в основном цикле:', error.message);
     }
 }
 
-console.log('🚀 Запуск слушателя...');
-console.log(`   Контракт: ${DISTRIBUTOR_ADDRESS}\n`);
+// ========== ЗАПУСК ==========
+async function main() {
+    console.log('🚀 ЗАПУСК СЛУШАТЕЛЯ');
+    console.log('===================');
+    
+    provider = await findWorkingRpc();
+    
+    console.log(`\n📡 Дистрибьюторы (${DISTRIBUTORS.length}):`);
+    DISTRIBUTORS.forEach(d => console.log(`   - ${d.name}: ${d.address}`));
+    
+    console.log(`\n⏳ Интервал: ${POLLING_INTERVAL / 1000} сек`);
+    console.log(`📦 Глубина при старте: ${START_BLOCKS_BACK} блоков\n`);
+    
+    // Первый запуск
+    await checkAllDistributors();
+    
+    // Периодическая проверка
+    setInterval(checkAllDistributors, POLLING_INTERVAL);
+}
 
-mainLoop();
-setInterval(mainLoop, POLLING_INTERVAL);
+main().catch(console.error);
 
 process.on('SIGINT', () => {
-    console.log('\n🛑 Остановка...');
+    console.log('\n🛑 Остановка слушателя...');
     process.exit(0);
 });
